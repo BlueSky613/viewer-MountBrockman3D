@@ -153,11 +153,24 @@ html, body {
   border-radius: 4px;
   cursor: pointer;
   font-size: 0.78rem;
+  border: 1px solid transparent;
+  user-select: none;
 }
 
-.layer-item:hover,
+.layer-item:hover {
+  background: rgba(110, 181, 164, 0.1);
+}
+
 .layer-item.selected {
-  background: rgba(110, 181, 164, 0.12);
+  background: rgba(110, 181, 164, 0.2);
+  border-color: rgba(110, 181, 164, 0.55);
+}
+
+.layer-item .layer-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .layer-item .swatch {

@@ -19,6 +19,7 @@ import vtkMouseCameraTrackballPanManipulator from "@kitware/vtk.js/Interaction/M
 import vtkMouseCameraTrackballZoomManipulator from "@kitware/vtk.js/Interaction/Manipulators/MouseCameraTrackballZoomManipulator";
 import vtkOrientationMarkerWidget from "@kitware/vtk.js/Interaction/Widgets/OrientationMarkerWidget";
 import vtkAxesActor from "@kitware/vtk.js/Rendering/Core/AxesActor";
+import vtkCellPicker from "@kitware/vtk.js/Rendering/Core/CellPicker";
 import { NORTH, viewAzimuthFromGridNorth } from "./north.js";
 import { createSectionViewer } from "./section.js";
 
@@ -389,27 +390,42 @@ function rebuildGravity() {
 }
 
 function makeLayerRow(meta) {
-  const row = document.createElement("label");
+  // Use <div>, not <label>: a label click toggles the checkbox and hides the solid,
+  // which looked like selection/remove was broken.
+  const row = document.createElement("div");
   row.className = "layer-item";
   row.dataset.id = meta.id;
+  row.setAttribute("role", "button");
+  row.tabIndex = 0;
   const entry = state.actors.get(meta.id);
-  const vis = entry ? entry.actor.getVisibility() : meta.defaultVisible;
+  const vis = entry ? entry.actor.getVisibility() : meta.defaultVisible !== false;
   row.innerHTML = `
-    <input type="checkbox" ${vis ? "checked" : ""} />
+    <input type="checkbox" ${vis ? "checked" : ""} title="Visibility" />
     <span class="swatch" style="background:${meta.color}"></span>
-    <span>${meta.label}</span>
+    <span class="layer-name">${meta.label}</span>
     <span class="code">${meta.code || ""}</span>
   `;
   const cb = row.querySelector("input");
+  cb.addEventListener("click", (e) => {
+    e.stopPropagation();
+  });
   cb.addEventListener("change", () => {
-    if (entry) {
-      entry.actor.setVisibility(cb.checked);
+    const live = state.actors.get(meta.id);
+    if (live) {
+      live.actor.setVisibility(cb.checked);
       state.renderWindow.render();
     }
   });
+  const select = () => selectLayer(meta.id);
   row.addEventListener("click", (e) => {
-    if (e.target === cb) return;
-    selectLayer(meta.id);
+    if (e.target === cb || e.target.closest("input")) return;
+    select();
+  });
+  row.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      select();
+    }
   });
   return row;
 }
@@ -543,65 +559,98 @@ function showSolidProps(meta) {
   el.solidProps.setAttribute("aria-hidden", "false");
 }
 
-function selectLayer(id) {
-  state.selectedId = id;
-  document.querySelectorAll(".layer-item").forEach((n) => {
-    n.classList.toggle("selected", n.dataset.id === id);
-  });
+function clearSelectionHighlight() {
+  for (const e of state.actors.values()) {
+    const prop = e.actor.getProperty();
+    prop.setAmbient(0.22);
+    prop.setSpecular(e.meta.kind === "fault" ? 0.35 : 0.18);
+    prop.setEdgeVisibility(false);
+  }
+}
 
+function selectLayer(id) {
   const entry = state.actors.get(id);
   if (!entry) {
+    state.selectedId = null;
     hideSolidProps();
     return;
   }
   const meta = entry.meta;
+  state.selectedId = id;
+  if (el.solidProps) el.solidProps.dataset.selectedId = id;
 
-  for (const [mid, e] of state.actors) {
-    const prop = e.actor.getProperty();
-    if (mid === id) {
-      prop.setAmbient(0.45);
-      prop.setSpecular(0.4);
-    } else {
-      prop.setAmbient(0.22);
-      prop.setSpecular(e.meta.kind === "fault" ? 0.35 : 0.18);
+  document.querySelectorAll(".layer-item").forEach((n) => {
+    n.classList.toggle("selected", n.dataset.id === id);
+  });
+
+  clearSelectionHighlight();
+  {
+    const prop = entry.actor.getProperty();
+    prop.setAmbient(0.55);
+    prop.setSpecular(0.45);
+    if (meta.kind === "solid") {
+      prop.setEdgeVisibility(true);
+      prop.setEdgeColor(1, 0.95, 0.55);
+      prop.setLineWidth(1.5);
     }
+  }
+  // Ensure selected solid is visible when chosen from the list
+  if (meta.kind === "solid" && !entry.actor.getVisibility()) {
+    entry.actor.setVisibility(true);
+    const row = document.querySelector(`.layer-item[data-id="${id}"] input`);
+    if (row) row.checked = true;
   }
   state.renderWindow.render();
 
   el.pick.textContent = `${meta.label}  [${meta.code || "—"}]\n${meta.lithology || meta.kind}\n${meta.triangleCount.toLocaleString()} triangles · vtk.js solid=${meta.solid ? "yes" : "no"}`;
-  el.relationBox.innerHTML = renderRelations(meta);
+  if (el.relationBox) el.relationBox.innerHTML = renderRelations(meta);
 
   if (meta.kind === "solid") showSolidProps(meta);
   else hideSolidProps();
 }
 
 function removeSelectedSolid() {
-  const id = state.selectedId;
-  if (!id) return;
+  const id =
+    state.selectedId ||
+    el.solidProps?.dataset?.selectedId ||
+    null;
+  if (!id) {
+    el.pick.textContent = "No solid selected";
+    return;
+  }
   const entry = state.actors.get(id);
-  if (!entry || entry.meta.kind !== "solid") return;
+  if (!entry || entry.meta.kind !== "solid") {
+    el.pick.textContent = "Select a volume solid first";
+    return;
+  }
 
-  state.renderer.removeActor(entry.actor);
-  state.actors.delete(id);
+  const label = entry.meta.label;
   state.removedSolids.push({
     meta: entry.meta,
     rawPositions: entry.rawPositions,
     rawIndices: entry.rawIndices,
   });
-  entry.polydata?.delete?.();
-  entry.mapper?.delete?.();
-  entry.actor?.delete?.();
+  state.renderer.removeActor(entry.actor);
+  try {
+    entry.polydata?.delete?.();
+    entry.mapper?.delete?.();
+    entry.actor?.delete?.();
+  } catch (_) {
+    /* vtk delete may throw if already freed */
+  }
+  state.actors.delete(id);
+  state.volumeCache.delete(id);
 
   state.selectedId = null;
+  if (el.solidProps) delete el.solidProps.dataset.selectedId;
   hideSolidProps();
   document.querySelectorAll(".layer-item").forEach((n) => {
     n.classList.toggle("selected", false);
   });
-  const row = document.querySelector(`.layer-item[data-id="${id}"]`);
-  if (row) row.remove();
+  document.querySelector(`.layer-item[data-id="${id}"]`)?.remove();
   updateUndoButton();
   state.renderWindow.render();
-  el.pick.textContent = `Removed ${entry.meta.label}`;
+  el.pick.textContent = `Removed ${label}`;
 }
 
 function restoreRemovedSolid() {
@@ -660,19 +709,93 @@ function computeSelectedVolume() {
 }
 
 function wireSolidPropsUi() {
-  el.solidPropsClose?.addEventListener("click", () => {
+  // Re-bind from live DOM (module-load refs can be null if markup order shifts).
+  const props = document.getElementById("solid-props");
+  const btnRemove = document.getElementById("btn-solid-remove");
+  const btnVolume = document.getElementById("btn-solid-volume");
+  const btnClose = document.getElementById("solid-props-close");
+  const btnUndo = document.getElementById("btn-undo-solid");
+  el.solidProps = props;
+  el.solidPropsTitle = document.getElementById("solid-props-title");
+  el.solidPropsBody = document.getElementById("solid-props-body");
+  el.solidPropsVolume = document.getElementById("solid-props-volume");
+  el.btnSolidRemove = btnRemove;
+  el.btnSolidVolume = btnVolume;
+  el.btnUndoSolid = btnUndo;
+
+  btnClose?.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
     hideSolidProps();
   });
-  el.btnSolidRemove?.addEventListener("click", () => {
+  btnRemove?.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
     removeSelectedSolid();
   });
-  el.btnSolidVolume?.addEventListener("click", () => {
+  btnVolume?.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
     computeSelectedVolume();
   });
-  el.btnUndoSolid?.addEventListener("click", () => {
+  btnUndo?.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
     restoreRemovedSolid();
   });
   updateUndoButton();
+}
+
+/** Click (no drag) on a solid in the 3D view → select it. */
+function setupSolidPicking() {
+  if (!state.interactor || !state.renderer) return;
+  const picker = vtkCellPicker.newInstance();
+  picker.setPickFromList(true);
+  picker.setTolerance(0.005);
+  state.solidPicker = picker;
+
+  let down = null;
+  const threshold = 6;
+
+  state.interactor.onLeftButtonPress((callData) => {
+    const p = callData?.position;
+    if (!p) return;
+    down = { x: p.x, y: p.y };
+  });
+
+  state.interactor.onLeftButtonRelease((callData) => {
+    if (!down) return;
+    const p = callData?.position;
+    if (!p) {
+      down = null;
+      return;
+    }
+    const dx = p.x - down.x;
+    const dy = p.y - down.y;
+    down = null;
+    if (dx * dx + dy * dy > threshold * threshold) return;
+
+    picker.initializePickList();
+    let nPick = 0;
+    for (const e of state.actors.values()) {
+      if (e.meta.kind === "solid" && e.actor.getVisibility()) {
+        picker.addPickList(e.actor);
+        nPick++;
+      }
+    }
+    if (nPick < 1) return;
+
+    picker.pick([p.x, p.y, 0], state.renderer);
+    const actors = picker.getActors() || [];
+    const hit = actors[0];
+    if (!hit) return;
+    for (const [id, e] of state.actors) {
+      if (e.actor === hit && e.meta.kind === "solid") {
+        selectLayer(id);
+        return;
+      }
+    }
+  });
 }
 
 function renderRelations(meta) {
@@ -1057,20 +1180,20 @@ async function main() {
   state.gravityRaw = await loadGravity();
   rebuildGravity();
   fillLists();
+  setupSolidPicking();
 
   state.renderer.resetCamera();
   syncInteractionCenter(state.interactorStyle);
   state.renderWindow.render();
 
-  const tris = solids.reduce((a, s) => a + s.triangleCount, 0);
   el.pick.textContent = "";
   setStatus("");
   updateCompass();
   el.relationBox.innerHTML = `
     <strong>Solid model (required)</strong><br/>
     GoCAD <em>VS01–VS14</em> volumetric shells → vtk.js PolyData solids.<br/>
-    <b>North:</b> ${NORTH.crs} · +Y = Grid North · Mag N = ${NORTH.gridMagneticAngleDeg.toFixed(2)}° east of grid.<br/>
-    Voxel stair-steps removed with <em>Taubin Laplacian</em> smoothing.
+    Click a solid in the list or in the 3D view to inspect · Remove / Volume / Undo.<br/>
+    <b>North:</b> ${NORTH.crs} · +Y = Grid North · Mag N = ${NORTH.gridMagneticAngleDeg.toFixed(2)}° east of grid.
   `;
 }
 
