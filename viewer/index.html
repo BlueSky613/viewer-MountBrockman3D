@@ -134,8 +134,27 @@
               <div id="mag-needle"></div>
             </div>
           </div>
+          <button type="button" id="btn-undo-solid" class="hud-undo" disabled title="Restore last removed solid">
+            Undo
+          </button>
         </div>
       </div>
+
+      <aside id="solid-props" class="hidden" aria-hidden="true">
+        <div class="solid-props-head">
+          <div>
+            <div class="solid-props-kicker">Solid unit</div>
+            <div id="solid-props-title" class="solid-props-title">—</div>
+          </div>
+          <button type="button" id="solid-props-close" class="solid-props-x" aria-label="Close panel">×</button>
+        </div>
+        <div id="solid-props-body" class="solid-props-body"></div>
+        <div id="solid-props-volume" class="solid-props-volume"></div>
+        <div class="solid-props-actions">
+          <button type="button" id="btn-solid-volume">Volume</button>
+          <button type="button" id="btn-solid-remove" class="danger">Remove</button>
+        </div>
+      </aside>
 
       <div id="pick-info"></div>
       <div id="legend">

@@ -31,6 +31,9 @@ const state = {
   zExag: 1.2,
   solidOpacity: 1.0,
   selectedId: null,
+  /** Stack of removed solids for Undo (most recent last). */
+  removedSolids: [],
+  volumeCache: new Map(), // id → { m3, km3 }
   gravityRaw: null,
   renderer: null,
   renderWindow: null,
@@ -61,6 +64,14 @@ const el = {
   secPickX: document.getElementById("sec-pick-x"),
   secPickY: document.getElementById("sec-pick-y"),
   secPickZ: document.getElementById("sec-pick-z"),
+  solidProps: document.getElementById("solid-props"),
+  solidPropsTitle: document.getElementById("solid-props-title"),
+  solidPropsBody: document.getElementById("solid-props-body"),
+  solidPropsVolume: document.getElementById("solid-props-volume"),
+  solidPropsClose: document.getElementById("solid-props-close"),
+  btnSolidVolume: document.getElementById("btn-solid-volume"),
+  btnSolidRemove: document.getElementById("btn-solid-remove"),
+  btnUndoSolid: document.getElementById("btn-undo-solid"),
 };
 
 function setStatus(msg) {
@@ -442,6 +453,96 @@ function fillLists() {
   }
 }
 
+function updateUndoButton() {
+  if (!el.btnUndoSolid) return;
+  const n = state.removedSolids.length;
+  el.btnUndoSolid.disabled = n === 0;
+  el.btnUndoSolid.title =
+    n === 0
+      ? "Restore last removed solid"
+      : `Restore ${state.removedSolids[n - 1].meta.label}`;
+  el.btnUndoSolid.textContent = n ? `Undo (${n})` : "Undo";
+}
+
+/**
+ * Closed-shell volume via divergence theorem (sum of tetrahedra to origin).
+ * Uses raw world coordinates (m) — display Z-exaggeration is ignored.
+ */
+function computeClosedShellVolumeM3(positions, indices) {
+  let sum = 0;
+  const nTris = indices.length / 3;
+  for (let t = 0; t < nTris; t++) {
+    const i0 = indices[t * 3] * 3;
+    const i1 = indices[t * 3 + 1] * 3;
+    const i2 = indices[t * 3 + 2] * 3;
+    const ax = positions[i0];
+    const ay = positions[i0 + 1];
+    const az = positions[i0 + 2];
+    const bx = positions[i1];
+    const by = positions[i1 + 1];
+    const bz = positions[i1 + 2];
+    const cx = positions[i2];
+    const cy = positions[i2 + 1];
+    const cz = positions[i2 + 2];
+    sum +=
+      ax * (by * cz - bz * cy) -
+      ay * (bx * cz - bz * cx) +
+      az * (bx * cy - by * cx);
+  }
+  return Math.abs(sum) / 6;
+}
+
+function formatVolume(m3) {
+  if (m3 >= 1e9) return `${(m3 / 1e9).toFixed(3)} km³`;
+  if (m3 >= 1e6) return `${(m3 / 1e6).toFixed(3)} Mm³`;
+  return `${m3.toLocaleString(undefined, { maximumFractionDigits: 0 })} m³`;
+}
+
+function hideSolidProps() {
+  if (!el.solidProps) return;
+  el.solidProps.classList.add("hidden");
+  el.solidProps.setAttribute("aria-hidden", "true");
+  if (el.solidPropsVolume) el.solidPropsVolume.textContent = "";
+}
+
+function showSolidProps(meta) {
+  if (!el.solidProps || meta.kind !== "solid") {
+    hideSolidProps();
+    return;
+  }
+  el.solidPropsTitle.textContent = meta.label;
+  const b = meta.bounds;
+  const pile = state.catalog?.stratigraphy?.youngToOld || [];
+  const pilePos = pile.indexOf(meta.code);
+  const younger = pilePos > 0 ? pile[pilePos - 1] : "—";
+  const older =
+    pilePos >= 0 && pilePos < pile.length - 1 ? pile[pilePos + 1] : "—";
+  const faults = (meta.faultedBy || []).join(", ") || "—";
+  el.solidPropsBody.innerHTML = `
+    <dl>
+      <div class="prop-row"><dt>Unit code</dt><dd>${meta.code || "—"}</dd></div>
+      <div class="prop-row"><dt>GoCAD</dt><dd>${meta.sourceFile || meta.id}</dd></div>
+      <div class="prop-row"><dt>Lithology</dt><dd>${meta.lithology || "—"}</dd></div>
+      <div class="prop-row"><dt>Color</dt><dd><span class="swatch-inline" style="background:${meta.color}"></span>${meta.color}</dd></div>
+      <div class="prop-row"><dt>Age order</dt><dd>${meta.ageOrder ?? "—"} (1 = oldest in pile)</dd></div>
+      <div class="prop-row"><dt>Stratigraphy</dt><dd>younger ${younger} → this → older ${older}</dd></div>
+      <div class="prop-row"><dt>Faulted by</dt><dd>${faults}</dd></div>
+      <div class="prop-row"><dt>Vertices</dt><dd>${(meta.vertexCount || 0).toLocaleString()}</dd></div>
+      <div class="prop-row"><dt>Triangles</dt><dd>${(meta.triangleCount || 0).toLocaleString()}</dd></div>
+      <div class="prop-row"><dt>Bounds E</dt><dd>${b ? `${b.min[0].toFixed(0)} – ${b.max[0].toFixed(0)} mE` : "—"}</dd></div>
+      <div class="prop-row"><dt>Bounds N</dt><dd>${b ? `${b.min[1].toFixed(0)} – ${b.max[1].toFixed(0)} mN` : "—"}</dd></div>
+      <div class="prop-row"><dt>Elevation</dt><dd>${b ? `${b.min[2].toFixed(1)} – ${b.max[2].toFixed(1)} m RL` : "—"}</dd></div>
+      <div class="prop-row"><dt>Smoothing</dt><dd>${meta.smoothed ? meta.smoothMethod || "yes" : "none"}</dd></div>
+    </dl>
+  `;
+  const cached = state.volumeCache.get(meta.id);
+  el.solidPropsVolume.textContent = cached
+    ? `Volume: ${formatVolume(cached.m3)} (${cached.km3.toFixed(4)} km³)`
+    : "Volume: — (press Volume)";
+  el.solidProps.classList.remove("hidden");
+  el.solidProps.setAttribute("aria-hidden", "false");
+}
+
 function selectLayer(id) {
   state.selectedId = id;
   document.querySelectorAll(".layer-item").forEach((n) => {
@@ -449,7 +550,10 @@ function selectLayer(id) {
   });
 
   const entry = state.actors.get(id);
-  if (!entry) return;
+  if (!entry) {
+    hideSolidProps();
+    return;
+  }
   const meta = entry.meta;
 
   for (const [mid, e] of state.actors) {
@@ -458,7 +562,7 @@ function selectLayer(id) {
       prop.setAmbient(0.45);
       prop.setSpecular(0.4);
     } else {
-      prop.setAmbient(meta.kind === "solid" ? 0.22 : 0.22);
+      prop.setAmbient(0.22);
       prop.setSpecular(e.meta.kind === "fault" ? 0.35 : 0.18);
     }
   }
@@ -466,6 +570,109 @@ function selectLayer(id) {
 
   el.pick.textContent = `${meta.label}  [${meta.code || "—"}]\n${meta.lithology || meta.kind}\n${meta.triangleCount.toLocaleString()} triangles · vtk.js solid=${meta.solid ? "yes" : "no"}`;
   el.relationBox.innerHTML = renderRelations(meta);
+
+  if (meta.kind === "solid") showSolidProps(meta);
+  else hideSolidProps();
+}
+
+function removeSelectedSolid() {
+  const id = state.selectedId;
+  if (!id) return;
+  const entry = state.actors.get(id);
+  if (!entry || entry.meta.kind !== "solid") return;
+
+  state.renderer.removeActor(entry.actor);
+  state.actors.delete(id);
+  state.removedSolids.push({
+    meta: entry.meta,
+    rawPositions: entry.rawPositions,
+    rawIndices: entry.rawIndices,
+  });
+  entry.polydata?.delete?.();
+  entry.mapper?.delete?.();
+  entry.actor?.delete?.();
+
+  state.selectedId = null;
+  hideSolidProps();
+  document.querySelectorAll(".layer-item").forEach((n) => {
+    n.classList.toggle("selected", false);
+  });
+  const row = document.querySelector(`.layer-item[data-id="${id}"]`);
+  if (row) row.remove();
+  updateUndoButton();
+  state.renderWindow.render();
+  el.pick.textContent = `Removed ${entry.meta.label}`;
+}
+
+function restoreRemovedSolid() {
+  const saved = state.removedSolids.pop();
+  if (!saved) {
+    updateUndoButton();
+    return;
+  }
+  const { meta, rawPositions, rawIndices } = saved;
+  const polydata = buildPolyData(rawPositions, rawIndices, state.origin, state.zExag);
+  const mapper = vtkMapper.newInstance({ scalarVisibility: false });
+  mapper.setInputData(polydata);
+  const actor = vtkActor.newInstance();
+  actor.setMapper(mapper);
+  styleActor(actor, meta);
+  actor.setVisibility(true);
+  state.renderer.addActor(actor);
+  state.actors.set(meta.id, {
+    actor,
+    mapper,
+    polydata,
+    meta,
+    rawPositions,
+    rawIndices,
+  });
+
+  if (el.solidList) {
+    const solids = [...state.catalog.solids]
+      .filter((s) => state.actors.has(s.id))
+      .sort((a, b) => a.ageOrder - b.ageOrder);
+    el.solidList.innerHTML = "";
+    solids.forEach((s) => el.solidList.appendChild(makeLayerRow(s)));
+  }
+
+  updateUndoButton();
+  state.renderWindow.render();
+  selectLayer(meta.id);
+  el.pick.textContent = `Restored ${meta.label}`;
+}
+
+function computeSelectedVolume() {
+  const id = state.selectedId;
+  if (!id) return;
+  const entry = state.actors.get(id);
+  if (!entry || entry.meta.kind !== "solid") return;
+  if (el.solidPropsVolume) el.solidPropsVolume.textContent = "Computing volume…";
+  // Yield so the status can paint before the heavy loop
+  requestAnimationFrame(() => {
+    const m3 = computeClosedShellVolumeM3(entry.rawPositions, entry.rawIndices);
+    const km3 = m3 / 1e9;
+    state.volumeCache.set(id, { m3, km3 });
+    if (el.solidPropsVolume) {
+      el.solidPropsVolume.textContent = `Volume: ${formatVolume(m3)} (${km3.toFixed(4)} km³) · closed shell, world metres`;
+    }
+  });
+}
+
+function wireSolidPropsUi() {
+  el.solidPropsClose?.addEventListener("click", () => {
+    hideSolidProps();
+  });
+  el.btnSolidRemove?.addEventListener("click", () => {
+    removeSelectedSolid();
+  });
+  el.btnSolidVolume?.addEventListener("click", () => {
+    computeSelectedVolume();
+  });
+  el.btnUndoSolid?.addEventListener("click", () => {
+    restoreRemovedSolid();
+  });
+  updateUndoButton();
 }
 
 function renderRelations(meta) {
@@ -694,6 +901,7 @@ function wireUi() {
   });
 
   wireSectionUi();
+  wireSolidPropsUi();
 }
 
 function setupCameraInteraction(interactor, container) {

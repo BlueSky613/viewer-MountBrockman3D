@@ -306,11 +306,171 @@ html, body {
 
 #compass-hud {
   display: flex;
-  align-items: flex-start;
-  justify-content: flex-end;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
   background: transparent;
   border: none;
   padding: 4px;
+  pointer-events: auto;
+}
+
+.hud-undo {
+  background: rgba(16, 22, 28, 0.82);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font: 500 0.72rem var(--font);
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+}
+
+.hud-undo:hover:not(:disabled) {
+  border-color: var(--accent-2);
+  color: #d7f3eb;
+}
+
+.hud-undo:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+#solid-props {
+  position: absolute;
+  top: 96px; /* clear magnetic needle + Undo */
+  right: 12px;
+  width: min(320px, calc(100% - 72px));
+  max-height: calc(100% - 108px);
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  background: rgba(18, 24, 30, 0.92);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  backdrop-filter: blur(10px);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.35);
+  overflow: auto;
+  pointer-events: auto;
+}
+
+#solid-props.hidden {
+  display: none;
+}
+
+.solid-props-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.solid-props-kicker {
+  font-size: 0.65rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.solid-props-title {
+  margin-top: 3px;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--solid);
+  line-height: 1.25;
+}
+
+.solid-props-x {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.solid-props-x:hover {
+  color: var(--ink);
+  border-color: var(--accent-2);
+}
+
+.solid-props-body {
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: #c5d0d8;
+}
+
+.solid-props-body .prop-row {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  gap: 6px;
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(58, 69, 82, 0.55);
+}
+
+.solid-props-body .prop-row dt {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.solid-props-body .prop-row dd {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  word-break: break-word;
+}
+
+.solid-props-body .swatch-inline {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  vertical-align: -1px;
+  margin-right: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.solid-props-volume {
+  min-height: 1.2em;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: #b8e0d4;
+}
+
+.solid-props-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.solid-props-actions button {
+  flex: 1;
+  background: var(--panel-2);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font: 500 0.78rem var(--font);
+  cursor: pointer;
+}
+
+.solid-props-actions button:hover {
+  border-color: var(--accent-2);
+}
+
+.solid-props-actions button.danger {
+  background: rgba(180, 60, 50, 0.22);
+  border-color: rgba(220, 90, 80, 0.45);
+}
+
+.solid-props-actions button.danger:hover {
+  border-color: #e07066;
+  color: #ffd4cf;
 }
 
 #compass {
