@@ -1,0 +1,21 @@
+# Dependencies & build
+node_modules/
+dist/
+
+# Converted binary meshes / gravity / images (regenerate with npm run convert)
+public/data/solids/
+public/data/surfaces/
+public/data/images/
+public/data/gravity.bin
+public/data/wells.json
+public/data/catalog.json
+
+# Precomputed cross-sections (regenerate with ../cross-section/generate.mjs)
+public/data/sections/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+.idea/

@@ -39,6 +39,41 @@
         <span id="z-exag-val">1.2×</span>
       </label>
 
+      <section class="panel section-panel">
+        <h2>Cross section <span class="hint">in 3D scene</span></h2>
+        <label class="check-row">
+          <input type="checkbox" id="section-enable" />
+          <span>Show section on cut plane</span>
+        </label>
+        <div class="section-group-label">N–S (constant easting)</div>
+        <div id="sec-pick-x" class="section-presets"></div>
+        <div class="section-group-label">E–W (constant northing)</div>
+        <div id="sec-pick-y" class="section-presets"></div>
+        <div class="section-group-label">Level plan</div>
+        <div id="sec-pick-z" class="section-presets"></div>
+        <label class="check-row">
+          <input type="checkbox" id="section-hide-vol" />
+          <span>Hide solids (section face only)</span>
+        </label>
+        <label class="check-row">
+          <input type="checkbox" id="section-patch" checked />
+          <span>Inferred gap fill</span>
+        </label>
+        <label class="check-row">
+          <input type="checkbox" id="section-contacts" checked />
+          <span>Contact lines</span>
+        </label>
+        <label class="check-row">
+          <input type="checkbox" id="section-faults" checked />
+          <span>Fault traces</span>
+        </label>
+        <label class="check-row">
+          <input type="checkbox" id="section-topo" checked />
+          <span>Topography</span>
+        </label>
+        <div id="section-status" class="section-status">Off</div>
+      </section>
+
       <section class="panel solids-panel">
         <h2>Volume solids <span class="hint">VS* · primary</span></h2>
         <div id="solid-list" class="layer-list"></div>
@@ -65,14 +100,44 @@
           Solids are the model body. Select a solid or fault for strata–fault–lithology links.
         </div>
       </section>
+
+      <section class="panel source-panel">
+        <h2>Source</h2>
+        <a
+          id="project-source"
+          class="source-link"
+          href="https://dasc.dmirs.wa.gov.au/"
+          target="_blank"
+          rel="noopener noreferrer"
+        >https://dasc.dmirs.wa.gov.au/</a>
+        <p class="source-note">DMPE Data and Software Centre (WA)</p>
+      </section>
     </aside>
 
     <main id="viewport">
       <div id="vtk-root"></div>
-      <div id="hud">
-        <div id="status">Loading solid catalog…</div>
-        <div id="pick-info"></div>
+
+      <div id="hud-top">
+        <div id="axes-hud" class="hud-card">
+          <div class="hud-title">Axes</div>
+          <div class="axes-legend">
+            <span class="ax x"><i></i>X East</span>
+            <span class="ax y"><i></i>Y North</span>
+            <span class="ax z"><i></i>Z Up</span>
+          </div>
+          <div class="hud-sub">GDA94 / MGA50</div>
+        </div>
+
+        <div id="compass-hud" title="Magnetic North">
+          <div id="compass" aria-label="Magnetic north needle">
+            <div id="compass-rose">
+              <div id="mag-needle"></div>
+            </div>
+          </div>
+        </div>
       </div>
+
+      <div id="pick-info"></div>
       <div id="legend">
         <div class="legend-title">Solid colors · GeoModeller</div>
         <div id="legend-swatches"></div>

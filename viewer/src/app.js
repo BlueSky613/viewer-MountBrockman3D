@@ -13,6 +13,14 @@ import vtkCellArray from "@kitware/vtk.js/Common/Core/CellArray";
 import vtkPoints from "@kitware/vtk.js/Common/Core/Points";
 import vtkDataArray from "@kitware/vtk.js/Common/Core/DataArray";
 import vtkSphereSource from "@kitware/vtk.js/Filters/Sources/SphereSource";
+import vtkInteractorStyleManipulator from "@kitware/vtk.js/Interaction/Style/InteractorStyleManipulator";
+import vtkMouseCameraTrackballRotateManipulator from "@kitware/vtk.js/Interaction/Manipulators/MouseCameraTrackballRotateManipulator";
+import vtkMouseCameraTrackballPanManipulator from "@kitware/vtk.js/Interaction/Manipulators/MouseCameraTrackballPanManipulator";
+import vtkMouseCameraTrackballZoomManipulator from "@kitware/vtk.js/Interaction/Manipulators/MouseCameraTrackballZoomManipulator";
+import vtkOrientationMarkerWidget from "@kitware/vtk.js/Interaction/Widgets/OrientationMarkerWidget";
+import vtkAxesActor from "@kitware/vtk.js/Rendering/Core/AxesActor";
+import { NORTH, viewAzimuthFromGridNorth } from "./north.js";
+import { createSectionViewer } from "./section.js";
 
 const DATA = "/data";
 
@@ -27,10 +35,12 @@ const state = {
   renderer: null,
   renderWindow: null,
   interactor: null,
+  interactorStyle: null,
+  orientationWidget: null,
+  section: null,
 };
 
 const el = {
-  status: document.getElementById("status"),
   pick: document.getElementById("pick-info"),
   solidList: document.getElementById("solid-list"),
   faultList: document.getElementById("fault-list"),
@@ -45,10 +55,57 @@ const el = {
   overlayViewer: document.getElementById("overlay-viewer"),
   overlayImg: document.getElementById("overlay-img"),
   overlayCaption: document.getElementById("overlay-caption"),
+  compassRose: document.getElementById("compass-rose"),
+  sectionEnable: document.getElementById("section-enable"),
+  sectionStatus: document.getElementById("section-status"),
+  secPickX: document.getElementById("sec-pick-x"),
+  secPickY: document.getElementById("sec-pick-y"),
+  secPickZ: document.getElementById("sec-pick-z"),
 };
 
 function setStatus(msg) {
-  el.status.textContent = msg;
+  if (el.pick && msg) el.pick.textContent = msg;
+}
+
+function updateCompass() {
+  if (!state.renderer || !el.compassRose) return;
+  const cam = state.renderer.getActiveCamera();
+  if (!cam) return;
+  const viewAz = viewAzimuthFromGridNorth(cam);
+  const magFromGrid = NORTH.gridMagneticAngleDeg;
+  el.compassRose.style.transform = `rotate(${-(viewAz - magFromGrid)}deg)`;
+}
+
+function setupOrientationAndCompass() {
+  const axesActor = vtkAxesActor.newInstance();
+  axesActor.setXAxisColor([220, 60, 50]);
+  axesActor.setYAxisColor([46, 200, 110]);
+  axesActor.setZAxisColor([50, 140, 230]);
+
+  const widget = vtkOrientationMarkerWidget.newInstance({
+    actor: axesActor,
+    interactor: state.interactor,
+  });
+  widget.setParentRenderer(state.renderer);
+  widget.setEnabled(true);
+  widget.setViewportCorner(vtkOrientationMarkerWidget.Corners.TOP_LEFT);
+  widget.setViewportSize(0.14);
+  widget.setMinPixelSize(96);
+  widget.setMaxPixelSize(160);
+  state.orientationWidget = widget;
+
+  const syncHud = () => {
+    updateCompass();
+    if (state.orientationWidget?.getEnabled()) {
+      state.orientationWidget.updateMarkerOrientation();
+    }
+  };
+
+  state.interactor.onAnimation(syncHud);
+  state.interactor.onEndAnimation(syncHud);
+  state.interactor.onMouseMove(syncHud);
+  state.renderer.getActiveCamera().onModified(syncHud);
+  syncHud();
 }
 
 function hexToRgb01(hex) {
@@ -187,7 +244,8 @@ function rebuildTransformedGeometry() {
   }
   rebuildWells();
   rebuildGravity();
-  state.renderWindow.render();
+  if (state.section?.isEnabled()) state.section.rebuild();
+  else state.renderWindow.render();
 }
 
 function linePolyData(pointsXYZ) {
@@ -458,6 +516,121 @@ function renderRelations(meta) {
   return "—";
 }
 
+function syncSectionPickButtons() {
+  const id = state.section?.getCurrentId();
+  document.querySelectorAll(".section-presets button[data-sec]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.sec === id);
+  });
+}
+
+function readSectionOptionsFromUi() {
+  const hideVolumes = document.getElementById("section-hide-vol")?.checked ?? false;
+  return {
+    fill: true,
+    patch: document.getElementById("section-patch")?.checked ?? true,
+    contacts: document.getElementById("section-contacts")?.checked ?? true,
+    faults: document.getElementById("section-faults")?.checked ?? true,
+    topo: document.getElementById("section-topo")?.checked ?? true,
+    hideVolumes,
+    // Default: clip away the front half; keep the solid behind the cut plane.
+    clipVolumes: !hideVolumes,
+  };
+}
+
+async function openSection(id) {
+  if (!state.section) return;
+  state.section.setOptions(readSectionOptionsFromUi(), { rebuild: false });
+  await state.section.show(id);
+  if (el.sectionEnable) el.sectionEnable.checked = true;
+  syncSectionPickButtons();
+}
+
+function closeSection() {
+  state.section?.hide();
+  if (el.sectionEnable) el.sectionEnable.checked = false;
+  syncSectionPickButtons();
+}
+
+function populateSectionPicker(index) {
+  const groups = {
+    x: el.secPickX,
+    y: el.secPickY,
+    z: el.secPickZ,
+  };
+  for (const g of Object.values(groups)) {
+    if (g) g.innerHTML = "";
+  }
+  for (const s of index.sections || []) {
+    const host = groups[s.axis];
+    if (!host) continue;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.dataset.sec = s.id;
+    btn.textContent = s.id;
+    btn.title = `${s.name} — place section face on cut plane in 3D`;
+    btn.addEventListener("click", () => {
+      openSection(s.id).catch((err) => {
+        console.error(err);
+        if (el.sectionStatus) el.sectionStatus.textContent = String(err.message || err);
+      });
+    });
+    host.appendChild(btn);
+  }
+}
+
+async function initSectionViewer() {
+  state.section = createSectionViewer({
+    renderer: state.renderer,
+    renderWindow: state.renderWindow,
+    getOrigin: () => state.origin,
+    getZExag: () => state.zExag,
+    getEntries: () => state.actors.values(),
+    statusEl: el.sectionStatus,
+  });
+  try {
+    const index = await state.section.loadIndex();
+    populateSectionPicker(index);
+    if (el.sectionStatus) {
+      el.sectionStatus.textContent = `Ready · ${index.sections.length} cut planes`;
+    }
+  } catch (err) {
+    console.error(err);
+    if (el.sectionStatus) {
+      el.sectionStatus.textContent = "Section data missing — run cross-section/generate.mjs";
+    }
+  }
+}
+
+function wireSectionUi() {
+  if (!el.sectionEnable) return;
+
+  el.sectionEnable.addEventListener("change", () => {
+    if (el.sectionEnable.checked) {
+      const id = state.section?.getCurrentId() || "X1";
+      openSection(id).catch((err) => {
+        console.error(err);
+        el.sectionEnable.checked = false;
+        if (el.sectionStatus) el.sectionStatus.textContent = String(err.message || err);
+      });
+    } else {
+      closeSection();
+    }
+  });
+
+  for (const id of [
+    "section-patch",
+    "section-contacts",
+    "section-faults",
+    "section-topo",
+    "section-hide-vol",
+  ]) {
+    document.getElementById(id)?.addEventListener("change", () => {
+      if (!state.section?.isEnabled()) return;
+      state.section.setOptions(readSectionOptionsFromUi());
+    });
+  }
+}
+
 function setGroupVisibility(kinds, on) {
   for (const e of state.actors.values()) {
     if (kinds.includes(e.meta.kind)) {
@@ -472,6 +645,7 @@ function setGroupVisibility(kinds, on) {
 function wireUi() {
   document.getElementById("btn-fit").addEventListener("click", () => {
     state.renderer.resetCamera();
+    syncInteractionCenter(state.interactorStyle);
     state.renderWindow.render();
   });
 
@@ -518,6 +692,61 @@ function wireUi() {
   document.getElementById("overlay-close").addEventListener("click", () => {
     el.overlayViewer.classList.add("hidden");
   });
+
+  wireSectionUi();
+}
+
+function setupCameraInteraction(interactor, container) {
+  const style = vtkInteractorStyleManipulator.newInstance();
+
+  // Left drag → rotate
+  const rotate = vtkMouseCameraTrackballRotateManipulator.newInstance({
+    button: 1,
+  });
+  // Right drag → pan (scene / camera follows mouse direction)
+  const panRight = vtkMouseCameraTrackballPanManipulator.newInstance({
+    button: 3,
+  });
+  // Middle drag → pan (optional)
+  const panMiddle = vtkMouseCameraTrackballPanManipulator.newInstance({
+    button: 2,
+  });
+  // Shift + left → pan
+  const panShift = vtkMouseCameraTrackballPanManipulator.newInstance({
+    button: 1,
+    shift: true,
+  });
+  // Wheel → zoom
+  const zoomScroll = vtkMouseCameraTrackballZoomManipulator.newInstance({
+    dragEnabled: false,
+    scrollEnabled: true,
+  });
+  // Ctrl + left drag → zoom
+  const zoomCtrl = vtkMouseCameraTrackballZoomManipulator.newInstance({
+    button: 1,
+    control: true,
+  });
+
+  style.addMouseManipulator(rotate);
+  style.addMouseManipulator(panRight);
+  style.addMouseManipulator(panMiddle);
+  style.addMouseManipulator(panShift);
+  style.addMouseManipulator(zoomScroll);
+  style.addMouseManipulator(zoomCtrl);
+
+  interactor.setInteractorStyle(style);
+
+  // Suppress browser context menu so right-drag can pan
+  container.addEventListener("contextmenu", (e) => e.preventDefault());
+
+  return style;
+}
+
+function syncInteractionCenter(style) {
+  if (!style || !state.renderer) return;
+  const cam = state.renderer.getActiveCamera();
+  if (!cam) return;
+  style.setCenterOfRotation(cam.getFocalPoint());
 }
 
 function setupVtk() {
@@ -538,6 +767,8 @@ function setupVtk() {
   state.renderer = fullScreen.getRenderer();
   state.renderWindow = fullScreen.getRenderWindow();
   state.interactor = fullScreen.getInteractor();
+  state.interactorStyle = setupCameraInteraction(state.interactor, root);
+  setupOrientationAndCompass();
 
   state.renderer.setBackground(0.055, 0.07, 0.085);
   return fullScreen;
@@ -546,6 +777,7 @@ function setupVtk() {
 async function main() {
   setStatus("Starting vtk.js…");
   setupVtk();
+  await initSectionViewer();
   wireUi();
 
   const catRes = await fetch(`${DATA}/catalog.json`);
@@ -577,6 +809,7 @@ async function main() {
     if (i % 2 === 0) state.renderWindow.render();
   }
   state.renderer.resetCamera();
+  syncInteractionCenter(state.interactorStyle);
   state.renderWindow.render();
 
   // 2) Faults (cut solids)
@@ -618,17 +851,18 @@ async function main() {
   fillLists();
 
   state.renderer.resetCamera();
+  syncInteractionCenter(state.interactorStyle);
   state.renderWindow.render();
 
   const tris = solids.reduce((a, s) => a + s.triangleCount, 0);
-  setStatus(
-    `${state.catalog.project} · ${solids.length} SOLIDS (${tris.toLocaleString()} tris) · vtk.js · GeoModeller colors`
-  );
+  el.pick.textContent = "";
+  setStatus("");
+  updateCompass();
   el.relationBox.innerHTML = `
     <strong>Solid model (required)</strong><br/>
-    GoCAD <em>VS01–VS14</em> volumetric shells rendered as vtk.js PolyData solids.<br/>
-    Colors from GeoModeller. Faults A1–E4 cut all Folded_Series solids.<br/>
-    Contact <em>S*</em> surfaces optional; solids are the geological body.
+    GoCAD <em>VS01–VS14</em> volumetric shells → vtk.js PolyData solids.<br/>
+    <b>North:</b> ${NORTH.crs} · +Y = Grid North · Mag N = ${NORTH.gridMagneticAngleDeg.toFixed(2)}° east of grid.<br/>
+    Voxel stair-steps removed with <em>Taubin Laplacian</em> smoothing.
   `;
 }
 

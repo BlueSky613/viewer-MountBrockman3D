@@ -375,6 +375,97 @@ function writeMeshBin(outPath, positions, indices) {
   fs.writeFileSync(outPath, Buffer.concat([header, posBuf, idxBuf]));
 }
 
+/**
+ * Taubin (non-shrinking) Laplacian smoothing — removes 50m×50m×2.5m
+ * voxel stair-steps on VS* isosurface solids while limiting volume collapse.
+ */
+function buildAdjacency(nVerts, indices) {
+  const neigh = Array.from({ length: nVerts }, () => []);
+  const pushUnique = (i, j) => {
+    const list = neigh[i];
+    for (let k = 0; k < list.length; k++) if (list[k] === j) return;
+    list.push(j);
+  };
+  for (let t = 0; t < indices.length; t += 3) {
+    const a = indices[t];
+    const b = indices[t + 1];
+    const c = indices[t + 2];
+    pushUnique(a, b);
+    pushUnique(b, a);
+    pushUnique(a, c);
+    pushUnique(c, a);
+    pushUnique(b, c);
+    pushUnique(c, b);
+  }
+  return neigh;
+}
+
+function laplacianStep(src, dst, neigh, factor) {
+  const n = src.length / 3;
+  for (let i = 0; i < n; i++) {
+    const nbrs = neigh[i];
+    const i3 = i * 3;
+    if (!nbrs.length) {
+      dst[i3] = src[i3];
+      dst[i3 + 1] = src[i3 + 1];
+      dst[i3 + 2] = src[i3 + 2];
+      continue;
+    }
+    let sx = 0;
+    let sy = 0;
+    let sz = 0;
+    for (let k = 0; k < nbrs.length; k++) {
+      const j3 = nbrs[k] * 3;
+      sx += src[j3];
+      sy += src[j3 + 1];
+      sz += src[j3 + 2];
+    }
+    const inv = 1 / nbrs.length;
+    const ax = sx * inv;
+    const ay = sy * inv;
+    const az = sz * inv;
+    dst[i3] = src[i3] + factor * (ax - src[i3]);
+    dst[i3 + 1] = src[i3 + 1] + factor * (ay - src[i3 + 1]);
+    dst[i3 + 2] = src[i3 + 2] + factor * (az - src[i3 + 2]);
+  }
+}
+
+function taubinSmooth(positions, indices, opts = {}) {
+  const iterations = opts.iterations ?? 35;
+  const lambda = opts.lambda ?? 0.63;
+  const mu = opts.mu ?? -0.67;
+  const nVerts = positions.length / 3;
+  const neigh = buildAdjacency(nVerts, indices);
+  let src = positions.slice();
+  let dst = new Float32Array(positions.length);
+  for (let it = 0; it < iterations; it++) {
+    laplacianStep(src, dst, neigh, lambda);
+    laplacianStep(dst, src, neigh, mu);
+  }
+  return src;
+}
+
+function boundsFromPositions(positions) {
+  let minX = Infinity,
+    minY = Infinity,
+    minZ = Infinity;
+  let maxX = -Infinity,
+    maxY = -Infinity,
+    maxZ = -Infinity;
+  for (let i = 0; i < positions.length; i += 3) {
+    const x = positions[i];
+    const y = positions[i + 1];
+    const z = positions[i + 2];
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (z < minZ) minZ = z;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+    if (z > maxZ) maxZ = z;
+  }
+  return { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] };
+}
+
 function classifySurface(fileName) {
   if (fileName === "Elevation.ts") return { kind: "topo", group: "topography" };
   if (fileName === "Geology.ts") return { kind: "topo_map", group: "topography" };
@@ -523,15 +614,31 @@ function convertOne(file, { isSolid }) {
     meta = { label: "Topography (DTM)", lithology: "Elevation surface", ageOrder: 0 };
   }
 
+  // Smooth voxel stair-steps on VS* solids (50m×50m×2.5m grid isosurfaces)
+  let positions = mesh.positions;
+  let bounds = mesh.bounds;
+  let smoothed = false;
+  if (isSolid) {
+    const t0 = Date.now();
+    positions = taubinSmooth(positions, mesh.indices, {
+      iterations: 40,
+      lambda: 0.63,
+      mu: -0.67,
+    });
+    bounds = boundsFromPositions(positions);
+    smoothed = true;
+    process.stdout.write(`smooth ${Date.now() - t0}ms… `);
+  }
+
   const stem = file.replace(/\.ts$/, "").replace(/\s+/g, "_");
   const binName = `${stem}.bin`;
   const outDir = isSolid ? SOLID_OUT : SURF_OUT;
   const relDir = isSolid ? "solids" : "surfaces";
-  writeMeshBin(path.join(outDir, binName), mesh.positions, mesh.indices);
+  writeMeshBin(path.join(outDir, binName), positions, mesh.indices);
 
   for (let i = 0; i < 3; i++) {
-    globalMin[i] = Math.min(globalMin[i], mesh.bounds.min[i]);
-    globalMax[i] = Math.max(globalMax[i], mesh.bounds.max[i]);
+    globalMin[i] = Math.min(globalMin[i], bounds.min[i]);
+    globalMax[i] = Math.max(globalMax[i], bounds.max[i]);
   }
 
   const entry = {
@@ -555,8 +662,7 @@ function convertOne(file, { isSolid }) {
         : [],
     vertexCount: mesh.vertexCount,
     triangleCount: mesh.triangleCount,
-    bounds: mesh.bounds,
-    // Solids ON by default (core of the viewer). Contact horizons OFF (redundant with solids).
+    bounds,
     defaultVisible: isSolid
       ? true
       : cls.kind === "fault" || cls.kind === "topo",
@@ -568,6 +674,8 @@ function convertOne(file, { isSolid }) {
           ? 0.35
           : 0.55,
     solid: isSolid,
+    smoothed,
+    smoothMethod: smoothed ? "taubin-laplacian" : null,
   };
 
   if (isSolid) solids.push(entry);
@@ -691,6 +799,8 @@ const catalog = {
   },
   overlayPolicy: {
     primary: "VS* closed volumetric shells rendered as opaque solids in vtk.js",
+    stairStepFix:
+      "VS* vertices sit on 50m×50m×2.5m voxel grid; Taubin Laplacian smoothing (40 iter) applied at convert",
     skipDuplicateTopo: "Geology.ts omitted — identical mesh to Elevation.ts",
     contacts: "S* horizons optional (off by default) — contacts duplicate solid boundaries",
     zFighting: "topo translucent; faults translucent over solids; solid opacity = 1",

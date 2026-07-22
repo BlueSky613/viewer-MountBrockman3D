@@ -15,7 +15,7 @@ npm start         # http://localhost:5173
 
 | Layer | Source | Role |
 |-------|--------|------|
-| **Solids (primary)** | GoCAD `VS01`–`VS14` | Closed volumetric shells → vtk.js solid bodies |
+| **Solids (primary)** | GoCAD `VS01`–`VS14` | Closed volumetric shells → vtk.js solid bodies (Taubin-smoothed) |
 | Faults | GoCAD `F*` | Cut solids (`InfluencedByFault` / `StopsOnFault`) |
 | Contacts | GoCAD `S*` | Optional horizon surfaces (off by default) |
 | Topo / wells / gravity | GoCAD Elevation, wells, gravity points | Context layers |
