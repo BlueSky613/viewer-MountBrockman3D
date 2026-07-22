@@ -19,7 +19,7 @@ import vtkMouseCameraTrackballPanManipulator from "@kitware/vtk.js/Interaction/M
 import vtkMouseCameraTrackballZoomManipulator from "@kitware/vtk.js/Interaction/Manipulators/MouseCameraTrackballZoomManipulator";
 import vtkOrientationMarkerWidget from "@kitware/vtk.js/Interaction/Widgets/OrientationMarkerWidget";
 import vtkAxesActor from "@kitware/vtk.js/Rendering/Core/AxesActor";
-import vtkCellPicker from "@kitware/vtk.js/Rendering/Core/CellPicker";
+import { FieldAssociations } from "@kitware/vtk.js/Common/DataModel/DataSet/Constants";
 import { NORTH, viewAzimuthFromGridNorth } from "./north.js";
 import { createSectionViewer } from "./section.js";
 
@@ -34,7 +34,8 @@ const state = {
   selectedId: null,
   /** Stack of removed solids for Undo (most recent last). */
   removedSolids: [],
-  volumeCache: new Map(), // id → { m3, km3 }
+  /** True while a Volume button computation is running (never precomputed on select). */
+  volumeComputing: false,
   gravityRaw: null,
   renderer: null,
   renderWindow: null,
@@ -42,6 +43,9 @@ const state = {
   interactorStyle: null,
   orientationWidget: null,
   section: null,
+  fullScreen: null,
+  openGLRW: null,
+  prevSelectedId: null,
 };
 
 const el = {
@@ -170,9 +174,10 @@ async function loadMeshBin(relPath) {
   const nTris = view.getUint32(8, true);
   const posOffset = 16;
   const posBytes = nVerts * 12;
-  const positions = new Float32Array(buf, posOffset, nVerts * 3).slice();
-  const indices = new Uint32Array(buf, posOffset + posBytes, nTris * 3).slice();
-  return { positions, indices };
+  // Views on the fetch buffer (no .slice copy) — keeps load CPU/memory lower.
+  const positions = new Float32Array(buf, posOffset, nVerts * 3);
+  const indices = new Uint32Array(buf, posOffset + posBytes, nTris * 3);
+  return { positions, indices, buffer: buf };
 }
 
 function buildPolyData(positions, indices, origin, zExag) {
@@ -220,8 +225,7 @@ function styleActor(actor, meta) {
   }
 }
 
-async function addMeshActor(meta) {
-  const { positions, indices } = await loadMeshBin(meta.file);
+function addMeshActorFromData(meta, positions, indices) {
   const polydata = buildPolyData(positions, indices, state.origin, state.zExag);
   const mapper = vtkMapper.newInstance({ scalarVisibility: false });
   mapper.setInputData(polydata);
@@ -229,6 +233,8 @@ async function addMeshActor(meta) {
   actor.setMapper(mapper);
   styleActor(actor, meta);
   actor.setVisibility(meta.defaultVisible !== false);
+  // Only solids are pickable in the 3D view (faster hardware pick).
+  actor.setPickable(meta.kind === "solid");
   state.renderer.addActor(actor);
   state.actors.set(meta.id, {
     actor,
@@ -239,6 +245,38 @@ async function addMeshActor(meta) {
     rawIndices: indices,
   });
   return actor;
+}
+
+async function addMeshActor(meta) {
+  const { positions, indices } = await loadMeshBin(meta.file);
+  return addMeshActorFromData(meta, positions, indices);
+}
+
+/** Same load set / order as before, but HTTP fetches run in parallel within the phase. */
+async function loadActorPhase(metas, label) {
+  if (!metas.length) return;
+  setStatus(`Loading ${label} (0/${metas.length})…`);
+  let done = 0;
+  const loaded = await Promise.all(
+    metas.map(async (meta) => {
+      try {
+        const mesh = await loadMeshBin(meta.file);
+        done++;
+        if (done === metas.length || done % 3 === 0) {
+          setStatus(`Loading ${label} (${done}/${metas.length})…`);
+        }
+        return { meta, ...mesh };
+      } catch (err) {
+        console.error(meta.id, err);
+        done++;
+        return null;
+      }
+    })
+  );
+  for (const item of loaded) {
+    if (!item) continue;
+    addMeshActorFromData(item.meta, item.positions, item.indices);
+  }
 }
 
 function rebuildTransformedGeometry() {
@@ -551,21 +589,19 @@ function showSolidProps(meta) {
       <div class="prop-row"><dt>Smoothing</dt><dd>${meta.smoothed ? meta.smoothMethod || "yes" : "none"}</dd></div>
     </dl>
   `;
-  const cached = state.volumeCache.get(meta.id);
-  el.solidPropsVolume.textContent = cached
-    ? `Volume: ${formatVolume(cached.m3)} (${cached.km3.toFixed(4)} km³)`
-    : "Volume: — (press Volume)";
+  // Volume is never precomputed — only after the Volume button is pressed.
+  el.solidPropsVolume.textContent = "Volume: — (press Volume)";
   el.solidProps.classList.remove("hidden");
   el.solidProps.setAttribute("aria-hidden", "false");
 }
 
-function clearSelectionHighlight() {
-  for (const e of state.actors.values()) {
-    const prop = e.actor.getProperty();
-    prop.setAmbient(0.22);
-    prop.setSpecular(e.meta.kind === "fault" ? 0.35 : 0.18);
-    prop.setEdgeVisibility(false);
-  }
+function resetActorHighlight(entry) {
+  if (!entry) return;
+  const prop = entry.actor.getProperty();
+  prop.setAmbient(0.22);
+  prop.setSpecular(entry.meta.kind === "fault" ? 0.35 : 0.18);
+  // Never use edge visibility for selection — edges on ~0.7M triangles freeze the UI.
+  prop.setEdgeVisibility(false);
 }
 
 function selectLayer(id) {
@@ -579,34 +615,38 @@ function selectLayer(id) {
   state.selectedId = id;
   if (el.solidProps) el.solidProps.dataset.selectedId = id;
 
+  // 1) Open the properties panel immediately (DOM only — must not wait on GPU).
+  if (meta.kind === "solid") showSolidProps(meta);
+  else hideSolidProps();
+
   document.querySelectorAll(".layer-item").forEach((n) => {
     n.classList.toggle("selected", n.dataset.id === id);
   });
+  el.pick.textContent = `${meta.label}  [${meta.code || "—"}]\n${meta.lithology || meta.kind}\n${meta.triangleCount.toLocaleString()} triangles · vtk.js solid=${meta.solid ? "yes" : "no"}`;
+  if (el.relationBox) el.relationBox.innerHTML = renderRelations(meta);
 
-  clearSelectionHighlight();
+  // 2) Cheap lighting highlight only (previous + current actor).
+  if (state.prevSelectedId && state.prevSelectedId !== id) {
+    resetActorHighlight(state.actors.get(state.prevSelectedId));
+  }
   {
     const prop = entry.actor.getProperty();
     prop.setAmbient(0.55);
-    prop.setSpecular(0.45);
-    if (meta.kind === "solid") {
-      prop.setEdgeVisibility(true);
-      prop.setEdgeColor(1, 0.95, 0.55);
-      prop.setLineWidth(1.5);
-    }
+    prop.setSpecular(0.4);
+    prop.setEdgeVisibility(false);
   }
-  // Ensure selected solid is visible when chosen from the list
+  state.prevSelectedId = id;
+
   if (meta.kind === "solid" && !entry.actor.getVisibility()) {
     entry.actor.setVisibility(true);
     const row = document.querySelector(`.layer-item[data-id="${id}"] input`);
     if (row) row.checked = true;
   }
-  state.renderWindow.render();
 
-  el.pick.textContent = `${meta.label}  [${meta.code || "—"}]\n${meta.lithology || meta.kind}\n${meta.triangleCount.toLocaleString()} triangles · vtk.js solid=${meta.solid ? "yes" : "no"}`;
-  if (el.relationBox) el.relationBox.innerHTML = renderRelations(meta);
-
-  if (meta.kind === "solid") showSolidProps(meta);
-  else hideSolidProps();
+  // 3) Defer scene redraw so the browser paints the modal first.
+  requestAnimationFrame(() => {
+    state.renderWindow?.render();
+  });
 }
 
 function removeSelectedSolid() {
@@ -639,9 +679,9 @@ function removeSelectedSolid() {
     /* vtk delete may throw if already freed */
   }
   state.actors.delete(id);
-  state.volumeCache.delete(id);
 
   state.selectedId = null;
+  if (state.prevSelectedId === id) state.prevSelectedId = null;
   if (el.solidProps) delete el.solidProps.dataset.selectedId;
   hideSolidProps();
   document.querySelectorAll(".layer-item").forEach((n) => {
@@ -649,7 +689,7 @@ function removeSelectedSolid() {
   });
   document.querySelector(`.layer-item[data-id="${id}"]`)?.remove();
   updateUndoButton();
-  state.renderWindow.render();
+  requestAnimationFrame(() => state.renderWindow?.render());
   el.pick.textContent = `Removed ${label}`;
 }
 
@@ -660,22 +700,9 @@ function restoreRemovedSolid() {
     return;
   }
   const { meta, rawPositions, rawIndices } = saved;
-  const polydata = buildPolyData(rawPositions, rawIndices, state.origin, state.zExag);
-  const mapper = vtkMapper.newInstance({ scalarVisibility: false });
-  mapper.setInputData(polydata);
-  const actor = vtkActor.newInstance();
-  actor.setMapper(mapper);
-  styleActor(actor, meta);
-  actor.setVisibility(true);
-  state.renderer.addActor(actor);
-  state.actors.set(meta.id, {
-    actor,
-    mapper,
-    polydata,
-    meta,
-    rawPositions,
-    rawIndices,
-  });
+  addMeshActorFromData(meta, rawPositions, rawIndices);
+  const restored = state.actors.get(meta.id);
+  if (restored) restored.actor.setVisibility(true);
 
   if (el.solidList) {
     const solids = [...state.catalog.solids]
@@ -686,7 +713,6 @@ function restoreRemovedSolid() {
   }
 
   updateUndoButton();
-  state.renderWindow.render();
   selectLayer(meta.id);
   el.pick.textContent = `Restored ${meta.label}`;
 }
@@ -696,15 +722,37 @@ function computeSelectedVolume() {
   if (!id) return;
   const entry = state.actors.get(id);
   if (!entry || entry.meta.kind !== "solid") return;
-  if (el.solidPropsVolume) el.solidPropsVolume.textContent = "Computing volume…";
-  // Yield so the status can paint before the heavy loop
+  if (state.volumeComputing) return;
+
+  // On-demand only: run when the Volume button is pressed (not on solid select).
+  state.volumeComputing = true;
+  if (el.btnSolidVolume) el.btnSolidVolume.disabled = true;
+  if (el.solidPropsVolume) {
+    el.solidPropsVolume.textContent = "Computing volume…";
+  }
+
+  // Yield two frames so "Computing…" paints before the heavy triangle loop.
   requestAnimationFrame(() => {
-    const m3 = computeClosedShellVolumeM3(entry.rawPositions, entry.rawIndices);
-    const km3 = m3 / 1e9;
-    state.volumeCache.set(id, { m3, km3 });
-    if (el.solidPropsVolume) {
-      el.solidPropsVolume.textContent = `Volume: ${formatVolume(m3)} (${km3.toFixed(4)} km³) · closed shell, world metres`;
-    }
+    requestAnimationFrame(() => {
+      try {
+        const m3 = computeClosedShellVolumeM3(
+          entry.rawPositions,
+          entry.rawIndices
+        );
+        const km3 = m3 / 1e9;
+        if (state.selectedId === id && el.solidPropsVolume) {
+          el.solidPropsVolume.textContent = `Volume: ${formatVolume(m3)} (${km3.toFixed(4)} km³) · closed shell, world metres`;
+        }
+      } catch (err) {
+        console.error(err);
+        if (el.solidPropsVolume) {
+          el.solidPropsVolume.textContent = "Volume: calculation failed";
+        }
+      } finally {
+        state.volumeComputing = false;
+        if (el.btnSolidVolume) el.btnSolidVolume.disabled = false;
+      }
+    });
   });
 }
 
@@ -746,13 +794,12 @@ function wireSolidPropsUi() {
   updateUndoButton();
 }
 
-/** Click (no drag) on a solid in the 3D view → select it. */
+/**
+ * Click (no drag) on a solid → select it.
+ * Uses GPU hardware picking (not CellPicker ray–triangle tests on millions of cells).
+ */
 function setupSolidPicking() {
-  if (!state.interactor || !state.renderer) return;
-  const picker = vtkCellPicker.newInstance();
-  picker.setPickFromList(true);
-  picker.setTolerance(0.005);
-  state.solidPicker = picker;
+  if (!state.interactor || !state.renderer || !state.openGLRW) return;
 
   let down = null;
   const threshold = 6;
@@ -763,7 +810,7 @@ function setupSolidPicking() {
     down = { x: p.x, y: p.y };
   });
 
-  state.interactor.onLeftButtonRelease((callData) => {
+  state.interactor.onLeftButtonRelease(async (callData) => {
     if (!down) return;
     const p = callData?.position;
     if (!p) {
@@ -775,25 +822,30 @@ function setupSolidPicking() {
     down = null;
     if (dx * dx + dy * dy > threshold * threshold) return;
 
-    picker.initializePickList();
-    let nPick = 0;
-    for (const e of state.actors.values()) {
-      if (e.meta.kind === "solid" && e.actor.getVisibility()) {
-        picker.addPickList(e.actor);
-        nPick++;
+    try {
+      if (!state.hwSelector) {
+        state.hwSelector = state.openGLRW.createSelector();
       }
-    }
-    if (nPick < 1) return;
+      const selector = state.hwSelector;
+      if (!selector) return;
+      selector.setFieldAssociation(FieldAssociations.FIELD_ASSOCIATION_CELLS);
+      selector.attach(state.openGLRW, state.renderer);
 
-    picker.pick([p.x, p.y, 0], state.renderer);
-    const actors = picker.getActors() || [];
-    const hit = actors[0];
-    if (!hit) return;
-    for (const [id, e] of state.actors) {
-      if (e.actor === hit && e.meta.kind === "solid") {
-        selectLayer(id);
-        return;
+      const x = Math.round(p.x);
+      const y = Math.round(p.y);
+      const src = await selector.getSourceDataAsync(state.renderer, x, y, x, y);
+      if (!src?.generateSelection) return;
+      const selections = src.generateSelection(x, y, x, y) || [];
+      const prop = selections[0]?.getProperties?.()?.prop;
+      if (!prop) return;
+      for (const [id, e] of state.actors) {
+        if (e.actor === prop && e.meta.kind === "solid") {
+          selectLayer(id);
+          return;
+        }
       }
+    } catch (err) {
+      console.warn("solid pick failed", err);
     }
   });
 }
@@ -1095,8 +1147,10 @@ function setupVtk() {
   const ctrl = root.querySelector(".vtk-controller");
   if (ctrl) ctrl.style.display = "none";
 
+  state.fullScreen = fullScreen;
   state.renderer = fullScreen.getRenderer();
   state.renderWindow = fullScreen.getRenderWindow();
+  state.openGLRW = fullScreen.getApiSpecificRenderWindow();
   state.interactor = fullScreen.getInteractor();
   state.interactorStyle = setupCameraInteraction(state.interactor, root);
   setupOrientationAndCompass();
@@ -1127,54 +1181,21 @@ async function main() {
     return;
   }
 
-  // 1) Load SOLIDS first — fundamental layer
-  let i = 0;
-  for (const solid of solids.sort((a, b) => a.ageOrder - b.ageOrder)) {
-    i++;
-    setStatus(`Loading SOLID ${i}/${solids.length}: ${solid.label}…`);
-    try {
-      await addMeshActor(solid);
-    } catch (err) {
-      console.error(solid.id, err);
-    }
-    if (i % 2 === 0) state.renderWindow.render();
-  }
+  // Same phases as before; fetches inside each phase run in parallel.
+  const solidsOrdered = [...solids].sort((a, b) => a.ageOrder - b.ageOrder);
+  await loadActorPhase(solidsOrdered, "solids");
   state.renderer.resetCamera();
   syncInteractionCenter(state.interactorStyle);
   state.renderWindow.render();
 
-  // 2) Faults (cut solids)
   const faults = state.catalog.surfaces.filter((s) => s.kind === "fault");
-  i = 0;
-  for (const f of faults) {
-    i++;
-    setStatus(`Loading faults ${i}/${faults.length}…`);
-    try {
-      await addMeshActor(f);
-    } catch (err) {
-      console.error(f.id, err);
-    }
-  }
+  await loadActorPhase(faults, "faults");
 
-  // 3) Topo
   const topo = state.catalog.surfaces.find((s) => s.kind === "topo");
-  if (topo) {
-    setStatus("Loading topography…");
-    await addMeshActor(topo);
-  }
+  if (topo) await loadActorPhase([topo], "topography");
 
-  // 4) Contact horizons (optional, hidden by default)
   const horizons = state.catalog.surfaces.filter((s) => s.kind === "horizon");
-  i = 0;
-  for (const h of horizons) {
-    i++;
-    if (i % 4 === 0) setStatus(`Loading contacts ${i}/${horizons.length}…`);
-    try {
-      await addMeshActor(h);
-    } catch (err) {
-      console.error(h.id, err);
-    }
-  }
+  await loadActorPhase(horizons, "contacts");
 
   rebuildWells();
   state.gravityRaw = await loadGravity();
