@@ -55,11 +55,12 @@ html, body {
 }
 
 .brand-icon {
-  width: 72px;
-  height: 72px;
+  width: 128px;
+  height: 128px;
   flex: none;
   object-fit: contain;
-  filter: drop-shadow(0 4px 10px rgba(212, 175, 55, 0.35));
+  background: transparent;
+  filter: drop-shadow(0 6px 14px rgba(212, 175, 55, 0.4));
 }
 
 .brand-text {
@@ -72,15 +73,8 @@ html, body {
   letter-spacing: 0.02em;
 }
 
-.brand-sub {
-  margin-top: 3px;
-  color: var(--solid);
-  font-size: 0.85rem;
-  font-weight: 500;
-}
-
 .brand-meta {
-  margin-top: 8px;
+  margin-top: 6px;
   color: var(--muted);
   font-size: 0.72rem;
   font-family: var(--mono);
